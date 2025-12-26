@@ -31,7 +31,7 @@ extern void printk_safe_flush_on_panic(void);
 
 extern int kptr_restrict;
 
-#define pr_fmt(fmt) fmt
+#define pr_fmt(fmt) "MyHook" fmt
 #define pr_emerg(fmt, ...) printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_alert(fmt, ...) printk(KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_crit(fmt, ...) printk(KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
