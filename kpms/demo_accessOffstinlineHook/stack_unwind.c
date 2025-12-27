@@ -49,6 +49,7 @@ const char *my_kbasename(const char *path)
 
 /**
  * 获取指定地址的 VMA 信息字符串
+ * 改进版：添加更好的错误处理和缓存机制
  */
 int get_vma_info_str(unsigned long ip, char *buf, size_t len)
 {
@@ -67,7 +68,10 @@ int get_vma_info_str(unsigned long ip, char *buf, size_t len)
 
     mmap_sem = (struct rw_semaphore *)((char *)mm + g_mmap_lock_offset);
 
+    // 尝试获取锁，如果失败则跳过（避免死锁）
     if (!g_down_read_trylock(mmap_sem)) {
+        // 锁竞争失败，返回空字符串但不报错
+        // 这是正常情况，因为其他线程可能正在使用
         return 0; 
     }
 
@@ -75,12 +79,22 @@ int get_vma_info_str(unsigned long ip, char *buf, size_t len)
     vma = g_find_vma(mm, ip);
 
     if (vma) {
+        unsigned long vm_start = *(unsigned long *)((char *)vma + g_vma_offset.vm_start);
+        unsigned long vm_end = *(unsigned long *)((char *)vma + g_vma_offset.vm_end);
+        
+        // 检查地址是否在 VMA 范围内
+        if (ip < vm_start || ip >= vm_end) {
+            // 地址不在这个 VMA 范围内，可能是 find_vma 返回了下一个 VMA
+            g_up_read(mmap_sem);
+            return 0;
+        }
+        
         struct file *f = *(struct file **)((char *)vma + g_vma_offset.vm_file);
         
         // 默认基址就是当前段的开始
-        unsigned long base = *(unsigned long *)((char *)vma + g_vma_offset.vm_start);
+        unsigned long base = vm_start;
         
-        // --- [新增逻辑：回溯寻找 Base Address] ---
+        // --- [回溯寻找 Base Address] ---
         if (f) {
             struct vm_area_struct *curr = vma;
             struct vm_area_struct *prev;
@@ -116,14 +130,24 @@ int get_vma_info_str(unsigned long ip, char *buf, size_t len)
                 char *tmp_buf = (char *)g_get_free_page(0x400000, 0); 
                 if (tmp_buf) {
                     char *p = g_file_path(f, tmp_buf, 4096);
-                    if (IS_ERR(p)) p = "?";
-                    const char *name = my_kbasename(p);
-                    
-                    // 打印格式：libc.so + 0xOffset
-                    ret_len = g_snprintf(buf, len, " %s + 0x%lx", name, offset);
+                    if (!IS_ERR(p)) {
+                        const char *name = my_kbasename(p);
+                        
+                        // 打印格式：libc.so + 0xOffset
+                        ret_len = g_snprintf(buf, len, " %s + 0x%lx", name, offset);
+                    } else {
+                        // file_path 失败，但我们仍然可以显示偏移
+                        ret_len = g_snprintf(buf, len, " <file> + 0x%lx", offset);
+                    }
                     
                     g_free_page((unsigned long)tmp_buf, 0);
+                } else {
+                    // 内存分配失败，但我们仍然可以显示偏移
+                    ret_len = g_snprintf(buf, len, " <file> + 0x%lx", offset);
                 }
+            } else {
+                // 缺少必要的函数指针，显示基本信息
+                ret_len = g_snprintf(buf, len, " <file> + 0x%lx", offset);
             }
         } else {
             // 匿名内存
@@ -158,17 +182,10 @@ static void my_unwind_compat(struct task_struct *task, struct stack_trace *trace
     }
 
     // 4. 获取起始 Frame Pointer (FP)
-    u32 fp = 0;
     // 检查 CPSR/PSTATE 的 T 位 (Bit 5)，判断是否为 Thumb 模式
     bool is_thumb = (regs->pstate & 0x20) != 0;
-
-    if (is_thumb) {
-        // Thumb 模式标准：FP = R7
-        fp = (u32)regs->regs[7];
-    } else {
-        // ARM 模式标准：FP = R11
-        fp = (u32)regs->regs[11];
-    }
+    
+    u32 fp = is_thumb ? (u32)regs->regs[7] : (u32)regs->regs[11];
 
     // 5. 循环回溯栈帧
     int depth = 0;
@@ -191,6 +208,7 @@ static void my_unwind_compat(struct task_struct *task, struct stack_trace *trace
 
         // 5.3 记录返回地址
         if (frame.ret_addr > 0x1000) {
+            // 去重：如果解出来的地址和上一条一样，就不存了
             if (trace->nr_entries > 0 && trace->entries[trace->nr_entries - 1] != frame.ret_addr) {
                 trace->entries[trace->nr_entries++] = frame.ret_addr;
             }

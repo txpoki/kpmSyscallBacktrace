@@ -10,7 +10,7 @@
 
 ## 核心功能
 
-- **系统调用 Hook**: 监控 `do_faccessat` 文件访问系统调用
+- **系统调用 Hook**: 监控 `do_faccessat` 和 `openat` 文件访问系统调用
 - **栈回溯**: 支持 ARM64 和 ARM32 (Thumb/ARM) 模式的用户栈回溯
 - **VMA 解析**: 解析虚拟内存区域，显示库文件名和偏移
 - **进程信息**: 记录进程名、PID、文件路径和访问模式
@@ -22,6 +22,11 @@
 [MyHook] #00 PC: 00007b2c4a8f20 libc.so + 0x2f20
 [MyHook] #01 PC: 00007b2c4a8f40 libc.so + 0x2f40  
 [MyHook] #02 PC: 00007b2c5a1234 libapp.so + 0x1234
+[MyHook] ------------------------------------------
+
+[MyHook] INLINE_OPENAT: [com.android.systemui] (PID:5678) -> /system/framework/services.jar [DFD:-100]
+[MyHook] #00 PC: 00007b2c4b1000 libc.so + 0x3000
+[MyHook] #01 PC: 00007b2c5c2000 libandroid_runtime.so + 0x2000
 [MyHook] ------------------------------------------
 ```
 
@@ -77,7 +82,8 @@ dmesg | grep MyHook  # 查看日志
 
 ### 📊 系统调用扩展
 - [ ] 支持更多系统调用的 Hook 追踪
-  - [ ] `openat` - 文件打开监控
+  - [x] `faccessat` - 文件访问检查监控 ✅
+  - [x] `openat` - 文件打开监控 ✅
   - [ ] `read`/`write` - 文件读写监控
   - [ ] `mmap`/`munmap` - 内存映射监控
   - [ ] `execve` - 进程执行监控
@@ -105,6 +111,18 @@ dmesg | grep MyHook  # 查看日志
 - **安全分析**: 监控恶意软件文件访问行为
 - **逆向工程**: 追踪 API 调用和代码执行流程
 - **性能分析**: 识别热点文件访问路径
+
+## 常见问题
+
+### 为什么有时候符号解析失败？
+
+这是正常现象，主要原因是锁竞争。详见 [FAQ.md](kpms/demo_accessOffstinlineHook/FAQ.md) 和 [SYMBOL_RESOLUTION_ISSUES.md](kpms/demo_accessOffstinlineHook/SYMBOL_RESOLUTION_ISSUES.md)
+
+### 更多问题
+
+- [FAQ.md](kpms/demo_accessOffstinlineHook/FAQ.md) - 常见问题解答
+- [OPENAT_HOOK.md](kpms/demo_accessOffstinlineHook/OPENAT_HOOK.md) - openat Hook 详情
+- [REFACTORING.md](kpms/demo_accessOffstinlineHook/REFACTORING.md) - 代码重构说明
 
 ## 许可证
 

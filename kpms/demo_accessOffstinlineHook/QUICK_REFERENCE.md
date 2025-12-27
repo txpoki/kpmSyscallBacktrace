@@ -39,8 +39,14 @@ kpm load /sdcard/kpm/accessOffstinlineHook.kpm
 ## 查看日志
 
 ```bash
-# 实时查看
+# 实时查看所有日志
 dmesg -w | grep -E "MyHook|StackUnwind|ProcessInfo"
+
+# 只看 faccessat
+dmesg -w | grep "INLINE_ACCESS"
+
+# 只看 openat
+dmesg -w | grep "INLINE_OPENAT"
 
 # 查看历史
 dmesg | grep -E "MyHook|StackUnwind|ProcessInfo"

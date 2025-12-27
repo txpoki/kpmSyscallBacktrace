@@ -17,6 +17,7 @@ KPM_DESCRIPTION("Inline Hook with print_vma_addr");
 static strncpy_from_user_t g_strncpy_from_user = NULL;
 static print_vma_addr_t g_print_vma_addr = NULL;
 static void *g_do_faccessat_addr = NULL;
+static void *g_do_sys_openat2_addr = NULL;  // openat hook target
 
 void before_do_faccessat(hook_fargs3_t *args, void *udata)
 {
@@ -42,6 +43,32 @@ void before_do_faccessat(hook_fargs3_t *args, void *udata)
     unwind_user_stack_standard(task);
 }
 
+void before_do_sys_openat2(hook_fargs4_t *args, void *udata)
+{
+    int dfd = (int)args->arg0;
+    const char __user *filename = (const char __user *)args->arg1;
+    // arg2 is struct open_how *how
+    // arg3 is size_t size
+
+    char path_buf[256] = {0};
+    char pkg_name[256] = {0};
+
+    if (g_strncpy_from_user) {
+        long ret = g_strncpy_from_user(path_buf, filename, sizeof(path_buf) - 1);
+        if (ret < 0) strncpy(path_buf, "<read_error>", sizeof(path_buf));
+    } else {
+        strncpy(path_buf, "<symbol_missing>", sizeof(path_buf));
+    }
+
+    struct task_struct *task = current;
+    get_process_cmdline(task, pkg_name, sizeof(pkg_name));
+
+    pr_info("INLINE_OPENAT: [%s] (PID:%d) -> %s [DFD:%d]\n", 
+            pkg_name, get_process_id(task), path_buf, dfd);
+
+    unwind_user_stack_standard(task);
+}
+
 static long kpm_init(const char *args, const char *event, void *__user reserved)
 {
     pr_info("kpm-inline-access (v9.0 print_vma_addr) init...\n");
@@ -61,20 +88,47 @@ static long kpm_init(const char *args, const char *event, void *__user reserved)
     g_strncpy_from_user = (strncpy_from_user_t)kallsyms_lookup_name("strncpy_from_user");
     g_print_vma_addr = (print_vma_addr_t)kallsyms_lookup_name("print_vma_addr");
 
+    // Hook do_faccessat
     g_do_faccessat_addr = (void *)kallsyms_lookup_name("do_faccessat");
     if (!g_do_faccessat_addr) {
         pr_err("do_faccessat missing\n");
         return -1;
     }
 
-    // Install hook
     hook_err_t err = hook_wrap3(g_do_faccessat_addr, before_do_faccessat, NULL, 0);
     if (err) {
-        pr_err("Hook installation failed\n");
+        pr_err("do_faccessat hook installation failed\n");
         return err;
     }
+    pr_info("do_faccessat hook installed\n");
 
-    pr_info("Hook success.\n");
+    // Hook do_sys_openat2 (used by openat/openat2 syscalls)
+    g_do_sys_openat2_addr = (void *)kallsyms_lookup_name("do_sys_openat2");
+    if (g_do_sys_openat2_addr) {
+        err = hook_wrap4(g_do_sys_openat2_addr, before_do_sys_openat2, NULL, 0);
+        if (err) {
+            pr_warn("do_sys_openat2 hook installation failed, trying do_sys_open\n");
+            g_do_sys_openat2_addr = NULL;
+        } else {
+            pr_info("do_sys_openat2 hook installed\n");
+        }
+    }
+
+    // Fallback: try do_sys_open for older kernels
+    if (!g_do_sys_openat2_addr) {
+        g_do_sys_openat2_addr = (void *)kallsyms_lookup_name("do_sys_open");
+        if (g_do_sys_openat2_addr) {
+            err = hook_wrap4(g_do_sys_openat2_addr, before_do_sys_openat2, NULL, 0);
+            if (err) {
+                pr_warn("do_sys_open hook installation failed\n");
+                g_do_sys_openat2_addr = NULL;
+            } else {
+                pr_info("do_sys_open hook installed\n");
+            }
+        }
+    }
+
+    pr_info("Hook initialization complete\n");
     return 0;
 }
 
@@ -82,7 +136,14 @@ static long kpm_exit(void *__user reserved)
 {
     if (g_do_faccessat_addr) {
         unhook(g_do_faccessat_addr);
+        pr_info("do_faccessat hook removed\n");
     }
+    
+    if (g_do_sys_openat2_addr) {
+        unhook(g_do_sys_openat2_addr);
+        pr_info("openat hook removed\n");
+    }
+    
     return 0;
 }
 
