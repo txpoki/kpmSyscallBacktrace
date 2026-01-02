@@ -38,6 +38,7 @@ typedef pid_t (*task_pid_nr_ns_t)(struct task_struct *task, enum pid_type type, 
 typedef int (*get_cmdline_t)(struct task_struct *task, char *buffer, int buflen);
 typedef long (*strncpy_from_user_t)(char *dst, const char __user *src, long count);
 typedef unsigned long (*arch_copy_from_user_t)(void *to, const void __user *from, unsigned long n);
+typedef unsigned long (*arch_copy_to_user_t)(void __user *to, const void *from, unsigned long n);
 typedef void (*print_vma_addr_t)(char *prefix, unsigned long ip);
 typedef struct vm_area_struct *(*find_vma_t)(struct mm_struct *mm, unsigned long addr);
 typedef char *(*file_path_t)(struct file *, char *, int);
@@ -46,6 +47,7 @@ typedef void (*up_read_t)(struct rw_semaphore *sem);
 typedef void (*free_page_t)(unsigned long addr, unsigned int order);
 typedef unsigned long (*get_free_page_t)(unsigned int gfp_mask, int order);
 typedef int (*snprintf_t)(char *buf, size_t size, const char *fmt, ...);
+typedef void (*put_task_struct_t)(struct task_struct *t);
 
 // VMA offset configuration
 struct vma_offsets_t {

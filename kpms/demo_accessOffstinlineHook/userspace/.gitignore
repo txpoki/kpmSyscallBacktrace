@@ -1,0 +1,7 @@
+# NDK build outputs
+libs/
+obj/
+
+# Temporary files
+*~
+*.swp
