@@ -7,12 +7,14 @@
 #include "common.h"
 #include "stack_unwind.h"
 #include "process_info.h"
+#include "hw_breakpoint.h"
+#include "process_memory.h"
 
 KPM_NAME("kpm-inline-access");
-KPM_VERSION("10.1.0");
+KPM_VERSION("10.3.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("bmax121 & User");
-KPM_DESCRIPTION("Inline Hook with filtering and supercall control");
+KPM_DESCRIPTION("Inline Hook with filtering, supercall control, hardware breakpoints, and memory access");
 
 // Filter configuration
 #define MAX_FILTERS 16
@@ -41,14 +43,14 @@ static struct {
     struct filter_entry filters[MAX_FILTERS];
     int filter_count;
 } module_state = {
-    .hook_enabled = 1,
+    .hook_enabled = 0,         // Default: disabled
     .access_hook_count = 0,
     .openat_hook_count = 0,
     .kill_hook_count = 0,
     .filter_mode = 0,          // Default: whitelist (no filtering)
-    .hook_access_enabled = 1,
-    .hook_openat_enabled = 1,
-    .hook_kill_enabled = 1,
+    .hook_access_enabled = 0,  // Default: disabled
+    .hook_openat_enabled = 0,  // Default: disabled
+    .hook_kill_enabled = 0,    // Default: disabled
     .filter_count = 0
 };
 
@@ -379,6 +381,219 @@ static long kpm_control(const char *ctl_args, char *__user out_msg, int outlen)
             ret = -EINVAL;
         }
     }
+    // Command: bp_set:addr:type:size:desc - Set hardware breakpoint
+    // Format: bp_set:0x12345678:0:2:my_function
+    // Format with PID: bp_set:0x12345678:0:2:1234:my_function
+    // type: 0=exec, 1=write, 2=read, 3=rw
+    // size: 0=1byte, 1=2bytes, 2=4bytes, 3=8bytes
+    else if (strncmp(ctl_args, "bp_set:", 7) == 0) {
+        const char *bp_spec = ctl_args + 7;
+        unsigned long addr = 0;
+        int type = 0, size = 2, pid = 0;  // Default: exec, 4 bytes, system-wide
+        char desc[128] = {0};
+        const char *p = bp_spec;
+        int field = 0;
+        
+        // Parse address (hex)
+        if (strncmp(p, "0x", 2) == 0 || strncmp(p, "0X", 2) == 0) {
+            p += 2;
+        }
+        while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
+            addr = addr * 16;
+            if (*p >= '0' && *p <= '9') addr += *p - '0';
+            else if (*p >= 'a' && *p <= 'f') addr += *p - 'a' + 10;
+            else if (*p >= 'A' && *p <= 'F') addr += *p - 'A' + 10;
+            p++;
+        }
+        
+        // Parse remaining fields: type:size:pid:desc or type:size:desc
+        while (*p == ':') {
+            p++;
+            field++;
+            
+            if (field == 1) {
+                // Type
+                type = *p - '0';
+                p++;
+            } else if (field == 2) {
+                // Size
+                size = *p - '0';
+                p++;
+            } else if (field == 3) {
+                // Could be PID or description
+                // If it's a number, it's PID, otherwise it's description
+                if (*p >= '0' && *p <= '9') {
+                    // Parse PID
+                    while (*p >= '0' && *p <= '9') {
+                        pid = pid * 10 + (*p - '0');
+                        p++;
+                    }
+                } else {
+                    // It's description
+                    strncpy(desc, p, sizeof(desc) - 1);
+                    desc[sizeof(desc) - 1] = '\0';
+                    break;
+                }
+            } else if (field == 4) {
+                // Description after PID
+                strncpy(desc, p, sizeof(desc) - 1);
+                desc[sizeof(desc) - 1] = '\0';
+                break;
+            }
+        }
+        
+        if (addr == 0) {
+            snprintf(kernel_out, sizeof(kernel_out), "Error: Invalid address");
+            ret = -EINVAL;
+        } else {
+            int bp_idx;
+            if (pid > 0) {
+                bp_idx = hw_breakpoint_set_for_pid(addr, type, size, pid, desc);
+            } else {
+                bp_idx = hw_breakpoint_set(addr, type, size, desc);
+            }
+            
+            if (bp_idx >= 0) {
+                if (pid > 0) {
+                    snprintf(kernel_out, sizeof(kernel_out), 
+                             "Breakpoint[%d] set at 0x%lx for PID=%d", bp_idx, addr, pid);
+                } else {
+                    snprintf(kernel_out, sizeof(kernel_out), 
+                             "Breakpoint[%d] set at 0x%lx (system-wide)", bp_idx, addr);
+                }
+            } else {
+                snprintf(kernel_out, sizeof(kernel_out), 
+                         "Failed to set breakpoint: %d", bp_idx);
+                ret = bp_idx;
+            }
+        }
+    }
+    // Command: bp_clear:index - Clear hardware breakpoint by index
+    else if (strncmp(ctl_args, "bp_clear:", 9) == 0) {
+        const char *idx_str = ctl_args + 9;
+        int idx = 0;
+        
+        // Parse index
+        while (*idx_str >= '0' && *idx_str <= '9') {
+            idx = idx * 10 + (*idx_str - '0');
+            idx_str++;
+        }
+        
+        int result = hw_breakpoint_clear(idx);
+        if (result == 0) {
+            snprintf(kernel_out, sizeof(kernel_out), "Breakpoint[%d] cleared", idx);
+        } else {
+            snprintf(kernel_out, sizeof(kernel_out), "Failed to clear breakpoint[%d]: %d", idx, result);
+            ret = result;
+        }
+    }
+    // Command: bp_clear_all - Clear all hardware breakpoints
+    else if (strcmp(ctl_args, "bp_clear_all") == 0) {
+        hw_breakpoint_clear_all();
+        snprintf(kernel_out, sizeof(kernel_out), "All breakpoints cleared");
+    }
+    // Command: bp_verbose_on - Enable verbose breakpoint logging
+    else if (strcmp(ctl_args, "bp_verbose_on") == 0) {
+        hw_breakpoint_set_verbose(1);
+        snprintf(kernel_out, sizeof(kernel_out), "Breakpoint verbose mode enabled");
+    }
+    // Command: bp_verbose_off - Disable verbose breakpoint logging
+    else if (strcmp(ctl_args, "bp_verbose_off") == 0) {
+        hw_breakpoint_set_verbose(0);
+        snprintf(kernel_out, sizeof(kernel_out), "Breakpoint verbose mode disabled");
+    }
+    // Command: bp_list - List all hardware breakpoints
+    else if (strcmp(ctl_args, "bp_list") == 0) {
+        int len = snprintf(kernel_out, sizeof(kernel_out), "Hardware Breakpoints:\n");
+        int count = 0;
+        
+        for (i = 0; i < MAX_HW_BREAKPOINTS && len < sizeof(kernel_out) - 100; i++) {
+            struct hw_breakpoint *bp = hw_breakpoint_get(i);
+            if (bp && bp->enabled) {
+                const char *type_str = "unknown";
+                switch (bp->type) {
+                    case HW_BP_TYPE_EXEC: type_str = "exec"; break;
+                    case HW_BP_TYPE_WRITE: type_str = "write"; break;
+                    case HW_BP_TYPE_READ: type_str = "read"; break;
+                    case HW_BP_TYPE_RW: type_str = "rw"; break;
+                }
+                
+                len += snprintf(kernel_out + len, sizeof(kernel_out) - len,
+                              "[%d] 0x%lx (%s, %d bytes, hits:%d) %s\n",
+                              i, bp->addr, type_str, 1 << bp->size, bp->hit_count,
+                              bp->description[0] ? bp->description : "");
+                count++;
+            }
+        }
+        
+        if (count == 0) {
+            len += snprintf(kernel_out + len, sizeof(kernel_out) - len, "  (none)\n");
+        }
+        len += snprintf(kernel_out + len, sizeof(kernel_out) - len, 
+                       "Total: %d/%d slots used", count, MAX_HW_BREAKPOINTS);
+    }
+    // Command: mem_read:pid:addr:size - Read memory from process
+    // Format: mem_read:1234:0x7f12345678:64
+    else if (strncmp(ctl_args, "mem_read:", 9) == 0) {
+        const char *mem_spec = ctl_args + 9;
+        int pid = 0;
+        unsigned long addr = 0;
+        int size = 16;  // Default: 16 bytes
+        const char *p = mem_spec;
+        
+        // Parse PID
+        while (*p >= '0' && *p <= '9') {
+            pid = pid * 10 + (*p - '0');
+            p++;
+        }
+        
+        // Parse address
+        if (*p == ':') {
+            p++;
+            if (strncmp(p, "0x", 2) == 0 || strncmp(p, "0X", 2) == 0) {
+                p += 2;
+            }
+            while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
+                addr = addr * 16;
+                if (*p >= '0' && *p <= '9') addr += *p - '0';
+                else if (*p >= 'a' && *p <= 'f') addr += *p - 'a' + 10;
+                else if (*p >= 'A' && *p <= 'F') addr += *p - 'A' + 10;
+                p++;
+            }
+        }
+        
+        // Parse size
+        if (*p == ':') {
+            p++;
+            size = 0;
+            while (*p >= '0' && *p <= '9') {
+                size = size * 10 + (*p - '0');
+                p++;
+            }
+        }
+        
+        if (pid <= 0 || addr == 0) {
+            snprintf(kernel_out, sizeof(kernel_out), "Error: Invalid PID or address");
+            ret = -EINVAL;
+        } else if (size <= 0 || size > 256) {
+            snprintf(kernel_out, sizeof(kernel_out), "Error: Invalid size (1-256)");
+            ret = -EINVAL;
+        } else {
+            char hex_buf[1024];
+            int bytes_read = process_memory_read_hex(pid, addr, hex_buf, sizeof(hex_buf), size);
+            
+            if (bytes_read > 0) {
+                snprintf(kernel_out, sizeof(kernel_out),
+                         "Read %d bytes from PID=%d at 0x%lx:\n%s",
+                         bytes_read, pid, addr, hex_buf);
+            } else {
+                snprintf(kernel_out, sizeof(kernel_out),
+                         "Failed to read memory from PID=%d at 0x%lx: %d",
+                         pid, addr, bytes_read);
+                ret = bytes_read;
+            }
+        }
+    }
     // Command: help - Show available commands
     else if (strcmp(ctl_args, "help") == 0) {
         snprintf(kernel_out, sizeof(kernel_out),
@@ -398,6 +613,13 @@ static long kpm_control(const char *ctl_args, char *__user out_msg, int outlen)
                  "  add_filter:name:X - Add name filter\n"
                  "  add_filter:pid:X  - Add PID filter\n"
                  "  clear_filters     - Clear all filters\n"
+                 "  bp_set:addr:type:size:pid:desc - Set hardware breakpoint\n"
+                 "  bp_clear:index    - Clear breakpoint by index\n"
+                 "  bp_clear_all      - Clear all breakpoints\n"
+                 "  bp_list           - List all breakpoints\n"
+                 "  bp_verbose_on     - Enable detailed breakpoint logging\n"
+                 "  bp_verbose_off    - Disable detailed breakpoint logging\n"
+                 "  mem_read:pid:addr:size - Read process memory\n"
                  "  help              - Show this help");
     }
     // Unknown command
@@ -423,7 +645,7 @@ static long kpm_control(const char *ctl_args, char *__user out_msg, int outlen)
 
 static long kpm_init(const char *args, const char *event, void *__user reserved)
 {
-    pr_info("kpm-inline-access (v9.0 with supercall) init...\n");
+    pr_info("kpm-inline-access (v10.3 with memory access) init...\n");
 
     // Initialize sub-modules
     if (stack_unwind_init() != 0) {
@@ -433,6 +655,16 @@ static long kpm_init(const char *args, const char *event, void *__user reserved)
 
     if (process_info_init() != 0) {
         pr_err("Failed to initialize process info\n");
+        return -1;
+    }
+    
+    if (hw_breakpoint_init() != 0) {
+        pr_err("Failed to initialize hardware breakpoints\n");
+        return -1;
+    }
+    
+    if (process_memory_init() != 0) {
+        pr_err("Failed to initialize process memory access\n");
         return -1;
     }
 
@@ -511,11 +743,15 @@ static long kpm_init(const char *args, const char *event, void *__user reserved)
 
     pr_info("Hook initialization complete. Supercall control enabled.\n");
     pr_info("Use 'kpm control kpm-inline-access help' to see available commands\n");
+    pr_info("NOTE: All hooks are DISABLED by default. Use 'enable' command to activate.\n");
     return 0;
 }
 
 static long kpm_exit(void *__user reserved)
 {
+    // Clear all hardware breakpoints
+    hw_breakpoint_clear_all();
+    
     if (g_do_faccessat_addr) {
         unhook(g_do_faccessat_addr);
         pr_info("do_faccessat hook removed\n");

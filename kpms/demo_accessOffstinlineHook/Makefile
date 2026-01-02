@@ -1,5 +1,5 @@
 MODULE_NAME := accessOffstinlineHook
-OBJS := $(MODULE_NAME).o stack_unwind.o process_info.o
+OBJS := $(MODULE_NAME).o stack_unwind.o process_info.o hw_breakpoint.o process_memory.o
 TARGET_COMPILE = aarch64-linux-gnu-
 ifndef TARGET_COMPILE
 $(error TARGET_COMPILE not set)
